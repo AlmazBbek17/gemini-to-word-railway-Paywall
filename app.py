@@ -905,7 +905,8 @@ def webhook():
             return jsonify({'error': 'Webhook secret not configured'}), 500
 
         sig_value = sig.split('v1=')[-1] if 'v1=' in sig else sig
-        expected = hmac.new(DODO_WEBHOOK_SECRET.encode(), payload, hashlib.sha256).hexdigest()
+        secret_bytes = base64.b64decode(DODO_WEBHOOK_SECRET.replace('whsec_', ''))
+expected = hmac.new(secret_bytes, payload, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, sig_value):
             print(f'❌ Invalid webhook signature')
             return jsonify({'error': 'Invalid signature'}), 400
