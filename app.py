@@ -28,9 +28,9 @@ CORS(app)
 DODO_WEBHOOK_SECRET = os.environ.get('DODO_WEBHOOK_SECRET', '')
 
 PRODUCTS = {
-    'monthly':  'pdt_0NhAc8GB9dJFyoDM3YWyp',
-    'yearly':   'pdt_0NhAn0hbxZRAihRIqBmYH',
-    'lifetime': 'pdt_0NhAn5s9PCSWvqh9pippe',
+    'monthly':  'pdt_0Nh18HtHXIP9Od1cy1DoE',
+    'yearly':   'pdt_0Nh18Xr5AvKcgtPL3AYGT',
+    'lifetime': 'pdt_0Nh18pGGx3eNDK1y4p6a0',
 }
 PRODUCT_TO_PLAN = {v: k for k, v in PRODUCTS.items()}
 
