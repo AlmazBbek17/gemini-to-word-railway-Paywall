@@ -982,6 +982,31 @@ def admin_grant():
     return jsonify({'ok': True, 'email': email, 'active': active, 'plan': plan})
 
 
+@app.route('/api/admin/list', methods=['GET'])
+def admin_list():
+    admin_secret = os.environ.get('ADMIN_SECRET', '')
+    if not admin_secret or request.headers.get('X-Admin-Secret', '') != admin_secret:
+        return jsonify({'error': 'unauthorized'}), 401
+
+    active_only = request.args.get('active_only', 'false').lower() == 'true'
+
+    with get_db() as conn:
+        if active_only:
+            rows = conn.execute(
+                'SELECT email, active, plan, since FROM paid_users WHERE active = 1 ORDER BY since DESC'
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT email, active, plan, since FROM paid_users ORDER BY since DESC'
+            ).fetchall()
+
+    users = [
+        {'email': r[0], 'active': bool(r[1]), 'plan': r[2], 'since': r[3]}
+        for r in rows
+    ]
+    return jsonify({'ok': True, 'count': len(users), 'users': users})
+
+
 # ============================================================
 # SUCCESS PAGE (after payment)
 # ============================================================
