@@ -29,12 +29,25 @@ CORS(app)
 # ============================================================
 DODO_WEBHOOK_SECRET = os.environ.get('DODO_WEBHOOK_SECRET', '')
 
+# Legacy products — still used by older installed versions of the extension.
+# Do NOT remove or change these IDs; existing users' checkout links point here.
 PRODUCTS = {
     'monthly':  'pdt_0Nh18HtHXIP9Od1cy1DoE',
     'yearly':   'pdt_0Nh18Xr5AvKcgtPL3AYGT',
     'lifetime': 'pdt_0Nh18pGGx3eNDK1y4p6a0',
 }
+
+# New products (2026 pricing) — TODO: fill in the real pdt_ IDs once created
+# in Dodo Payments. Both old and new IDs map to the same plan name, so the
+# webhook records a clean 'monthly'/'yearly' regardless of which checkout
+# link (old or new extension version) the customer used.
+PRODUCTS_V2 = {
+    'monthly':  'pdt_REPLACE_MONTHLY',
+    'yearly':   'pdt_REPLACE_YEARLY',
+}
+
 PRODUCT_TO_PLAN = {v: k for k, v in PRODUCTS.items()}
+PRODUCT_TO_PLAN.update({v: k for k, v in PRODUCTS_V2.items()})
 
 FREE_LIMIT = 3
 
