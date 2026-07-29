@@ -16,12 +16,20 @@ from docx.oxml.ns import qn
 from lxml import etree
 import copy
 from datetime import datetime
-import markdown as md_lib
 
-# WeasyPrint needs native system libraries (Cairo/Pango/GDK-Pixbuf) that may
-# not be present in every deploy environment. Import defensively so a
-# missing/broken WeasyPrint install only takes down the PDF endpoint,
-# not the entire app (docx export, payment webhooks, status checks, etc).
+# Both markdown and weasyprint are only needed for MD/PDF export. Import
+# defensively — if either fails to install/load for any reason (missing
+# from requirements.txt, build cache issue, missing system libs, etc),
+# only those two export formats break, never the whole app (docx export,
+# payment webhooks, /api/status, etc keep working regardless).
+try:
+    import markdown as md_lib
+    MARKDOWN_AVAILABLE = True
+except Exception as _md_err:
+    md_lib = None
+    MARKDOWN_AVAILABLE = False
+    print(f"[WARN] markdown library unavailable, PDF export disabled: {_md_err}")
+
 try:
     from weasyprint import HTML as WeasyHTML
     WEASYPRINT_AVAILABLE = True
@@ -946,7 +954,7 @@ def content_to_html(content):
 
 @app.route('/api/export-chat-pdf', methods=['POST'])
 def export_chat_pdf():
-    if not WEASYPRINT_AVAILABLE:
+    if not WEASYPRINT_AVAILABLE or not MARKDOWN_AVAILABLE:
         return jsonify({'error': 'PDF export is temporarily unavailable on this server'}), 503
 
     try:
