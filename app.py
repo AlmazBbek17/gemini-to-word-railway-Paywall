@@ -16,6 +16,19 @@ from docx.oxml.ns import qn
 from lxml import etree
 import copy
 from datetime import datetime
+import markdown as md_lib
+
+# WeasyPrint needs native system libraries (Cairo/Pango/GDK-Pixbuf) that may
+# not be present in every deploy environment. Import defensively so a
+# missing/broken WeasyPrint install only takes down the PDF endpoint,
+# not the entire app (docx export, payment webhooks, status checks, etc).
+try:
+    from weasyprint import HTML as WeasyHTML
+    WEASYPRINT_AVAILABLE = True
+except Exception as _weasy_err:
+    WeasyHTML = None
+    WEASYPRINT_AVAILABLE = False
+    print(f"[WARN] WeasyPrint unavailable, PDF export disabled: {_weasy_err}")
 
 import sqlite3
 from contextlib import contextmanager
@@ -901,8 +914,87 @@ def export_chat():
 
 
 # ============================================================
-# DODO PAYMENTS — WEBHOOK & STATUS (below)
+# EXPORT CHAT AS PDF
 # ============================================================
+PDF_PAGE_CSS = """
+@page { size: A4; margin: 2cm; }
+body { font-family: 'DejaVu Sans', Arial, sans-serif; font-size: 11pt; line-height: 1.5; color: #202124; }
+h1 { text-align: center; font-size: 20pt; margin-bottom: 4pt; }
+.pdf-date { text-align: center; color: #666; font-size: 9pt; margin-bottom: 24pt; }
+.msg-role { font-weight: 700; font-size: 13pt; margin-top: 18pt; margin-bottom: 6pt; }
+.msg-role.user { color: rgb(33, 150, 243); }
+.msg-role.model { color: rgb(76, 175, 80); }
+.msg-divider { border: none; border-top: 1px solid #ccc; margin: 16pt 0; }
+pre, code { font-family: 'DejaVu Sans Mono', monospace; background: #f5f5f5; }
+pre { padding: 8pt; border-radius: 4pt; overflow-x: auto; white-space: pre-wrap; }
+code { padding: 1pt 4pt; border-radius: 3pt; }
+table { border-collapse: collapse; width: 100%; margin: 8pt 0; }
+th, td { border: 1px solid #ccc; padding: 4pt 8pt; text-align: left; }
+th { background: #f5f5f5; }
+blockquote { border-left: 3px solid #ccc; margin: 8pt 0; padding-left: 10pt; color: #555; }
+img { max-width: 100%; }
+"""
+
+MD_EXTENSIONS = ['extra', 'sane_lists', 'nl2br']
+
+def content_to_html(content):
+    """Same markdown-ish content format used for the .docx/.md exports —
+    render it through the `markdown` library rather than reimplementing
+    a parser here."""
+    return md_lib.markdown(content or '', extensions=MD_EXTENSIONS)
+
+
+@app.route('/api/export-chat-pdf', methods=['POST'])
+def export_chat_pdf():
+    if not WEASYPRINT_AVAILABLE:
+        return jsonify({'error': 'PDF export is temporarily unavailable on this server'}), 503
+
+    try:
+        data = request.get_json(force=True)
+        messages = data.get('messages', [])
+        title = data.get('title', 'Gemini Chat')
+
+        if not messages:
+            return jsonify({'error': 'No messages'}), 400
+
+        body_parts = []
+        for i, msg in enumerate(messages):
+            role = msg.get('role', 'user')
+            content = msg.get('content', '')
+            role_label = 'You' if role == 'user' else 'Gemini'
+            role_class = 'user' if role == 'user' else 'model'
+
+            body_parts.append(f'<div class="msg-role {role_class}">{role_label}</div>')
+            body_parts.append(content_to_html(content))
+
+            if i < len(messages) - 1:
+                body_parts.append('<hr class="msg-divider">')
+
+        html_doc = f"""
+        <html>
+          <head><meta charset="utf-8"><style>{PDF_PAGE_CSS}</style></head>
+          <body>
+            <h1>{title}</h1>
+            <div class="pdf-date">{datetime.now().strftime('%d.%m.%Y %H:%M')}</div>
+            {''.join(body_parts)}
+          </body>
+        </html>
+        """
+
+        pdf_bytes = WeasyHTML(string=html_doc).write_pdf()
+        buf = io.BytesIO(pdf_bytes)
+        buf.seek(0)
+
+        return send_file(
+            buf,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name='gemini-chat.pdf'
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 
 # ============================================================
