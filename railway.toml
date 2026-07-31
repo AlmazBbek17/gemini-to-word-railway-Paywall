@@ -1,5 +1,3 @@
 [build]
-builder = "nixpacks"
-
-[build.nixpacksPlan.phases.setup]
-nixPkgs = ["libxslt", "libxml2", "python312"]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"

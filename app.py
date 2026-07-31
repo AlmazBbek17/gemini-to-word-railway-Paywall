@@ -38,7 +38,19 @@ except Exception as _weasy_err:
     WEASYPRINT_AVAILABLE = False
     print(f"[WARN] WeasyPrint unavailable, PDF export disabled: {_weasy_err}")
 
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # headless, no display/GUI backend needed on a server
+    import matplotlib.pyplot as plt
+    import io as _mpl_io
+    import base64 as _b64
+    MATPLOTLIB_AVAILABLE = True
+except Exception as _mpl_err:
+    MATPLOTLIB_AVAILABLE = False
+    print(f"[WARN] matplotlib unavailable, PDF formulas will render as plain text: {_mpl_err}")
+
 import sqlite3
+import gevent
 from contextlib import contextmanager
 from standardwebhooks.webhooks import Webhook, WebhookVerificationError
 
@@ -63,14 +75,57 @@ PRODUCTS = {
 # webhook records a clean 'monthly'/'yearly' regardless of which checkout
 # link (old or new extension version) the customer used.
 PRODUCTS_V2 = {
-    'monthly':  'pdt_REPLACE_MONTHLY',
-    'yearly':   'pdt_REPLACE_YEARLY',
+    'monthly_regular':     'pdt_0NkIxeDpTYW8G8wbrzZok',
+    'monthly_discounted':  'pdt_0NkIxYCpjmwZik7rbztSH',
+    'yearly_regular':      'pdt_0NkIy433ugvYHxlnt6yS6',
+    'yearly_discounted':   'pdt_0NkIxqS1tLIxEDv3cJk3z',
+}
+
+# Webhook plan lookup only cares about monthly vs yearly, not which price
+# tier was charged — so both the regular and discounted product IDs for a
+# plan map to the same plan name here.
+PRODUCTS_V2_TO_PLAN = {
+    'pdt_0NkIxeDpTYW8G8wbrzZok': 'monthly',
+    'pdt_0NkIxYCpjmwZik7rbztSH': 'monthly',
+    'pdt_0NkIy433ugvYHxlnt6yS6': 'yearly',
+    'pdt_0NkIxqS1tLIxEDv3cJk3z': 'yearly',
 }
 
 PRODUCT_TO_PLAN = {v: k for k, v in PRODUCTS.items()}
-PRODUCT_TO_PLAN.update({v: k for k, v in PRODUCTS_V2.items()})
+PRODUCT_TO_PLAN.update(PRODUCTS_V2_TO_PLAN)
 
-FREE_LIMIT = 3
+FREE_LIMIT = 3  # legacy, unused — kept only to avoid breaking any external reference
+
+# ============================================================
+# CENTRALIZED CLIENT CONFIG — limits (env vars, Railway-editable without
+# a redeploy of the extension) and prices (still edited here, but a
+# Railway redeploy takes minutes vs. days for a Chrome Web Store review).
+# ============================================================
+FREE_TOTAL_LIMIT = int(os.environ.get('FREE_TOTAL_LIMIT', '10'))
+DAILY_FREE_LIMIT = int(os.environ.get('DAILY_FREE_LIMIT', '1'))
+
+# TODO: once we can verify Dodo's Products API (exact endpoint/auth), swap
+# these hardcoded numbers for a live fetch from Dodo so a price change in
+# the Dodo dashboard alone propagates here automatically. For now this is
+# still centralized (redeploy here, no extension update needed) — just
+# not auto-synced with Dodo's dashboard yet.
+PRICES_CONFIG = {
+    'monthly': {'regular': 4.99, 'discounted': 3.77},
+    'yearly': {
+        'regular': 45.24, 'discounted': 23.87,
+        'regularPerMonth': 3.77, 'discountedPerMonth': 1.99,
+    },
+}
+
+@app.route('/api/config', methods=['GET'])
+def get_client_config():
+    return jsonify({
+        'freeTotalLimit': FREE_TOTAL_LIMIT,
+        'dailyFreeLimit': DAILY_FREE_LIMIT,
+        'prices': PRICES_CONFIG,
+    })
+
+
 
 # ============================================================
 # PERSISTENT STORAGE — SQLite on Railway volume
@@ -152,6 +207,12 @@ def make_run(text, italic=True, bold=False):
     rfonts = sub_el(wrpr, W_NS, 'rFonts')
     rfonts.set(f'{{{W_NS}}}ascii', 'Cambria Math')
     rfonts.set(f'{{{W_NS}}}hAnsi', 'Cambria Math')
+    # Cambria Math renders visually smaller than body text at the same
+    # nominal point size (a known Word quirk) — bump it up a bit so
+    # formulas look proportionate to the surrounding paragraph text
+    # instead of noticeably tiny. 26 half-points = 13pt.
+    sz = sub_el(wrpr, W_NS, 'sz')
+    sz.set(f'{{{W_NS}}}val', '26')
     t = sub_el(r, MATH_NS, 't')
     t.text = text
     t.set(f'{{{W_NS}}}space', 'preserve')
@@ -722,10 +783,22 @@ def process_content(doc, content):
 
         # Normal paragraph
         p = doc.add_paragraph()
-        _text_math(doc, stripped) if ('$$' in stripped or (stripped.count('$') >= 2)) else _fmt(p, stripped)
-        if '$' in stripped:
-            p.clear()
+        if '$$' in stripped:
+            # Block formula(s) present — _text_math adds its own paragraph(s)
+            # internally, so don't populate the placeholder `p` at all.
+            p._element.getparent().remove(p._element)
+            _text_math(doc, stripped)
+        elif '$' in stripped:
+            # Inline-only math (single $...$ pairs, no $$) — handle directly
+            # on the placeholder paragraph. Previously this ALSO ran
+            # through _text_math first (whenever count('$') >= 2, true for
+            # any inline pair too), which — finding no literal "$$" —  fell
+            # into _text_math's single-paragraph fallback and added a
+            # second, duplicate paragraph with the raw "$...$" text still
+            # in it, right alongside the correctly-rendered one below.
             _text_math_inline(p, stripped)
+        else:
+            _fmt(p, stripped)
         i += 1
 
 def _text_math(doc, text):
@@ -936,8 +1009,8 @@ h1 { text-align: center; font-size: 20pt; margin-bottom: 4pt; }
 pre, code { font-family: 'DejaVu Sans Mono', monospace; background: #f5f5f5; }
 pre { padding: 8pt; border-radius: 4pt; overflow-x: auto; white-space: pre-wrap; }
 code { padding: 1pt 4pt; border-radius: 3pt; }
-table { border-collapse: collapse; width: 100%; margin: 8pt 0; }
-th, td { border: 1px solid #ccc; padding: 4pt 8pt; text-align: left; }
+table { border-collapse: collapse; width: 100%; max-width: 100%; table-layout: fixed; margin: 8pt 0; }
+th, td { border: 1px solid #ccc; padding: 4pt 8pt; text-align: left; word-wrap: break-word; overflow-wrap: break-word; word-break: break-word; }
 th { background: #f5f5f5; }
 blockquote { border-left: 3px solid #ccc; margin: 8pt 0; padding-left: 10pt; color: #555; }
 img { max-width: 100%; }
@@ -945,11 +1018,88 @@ img { max-width: 100%; }
 
 MD_EXTENSIONS = ['extra', 'sane_lists', 'nl2br']
 
+def render_latex_to_img(latex, display=False):
+    """Render a LaTeX-ish math expression to a small PNG via matplotlib's
+    mathtext parser (pure Python, no system TeX needed). Returns an <img>
+    tag with the image inlined as base64, or None if rendering fails."""
+    if not MATPLOTLIB_AVAILABLE:
+        return None
+    try:
+        fontsize = 16 if display else 13
+        fig = plt.figure(figsize=(0.01, 0.01))
+        fig.text(0, 0, f'${latex}$', fontsize=fontsize)
+        buf = _mpl_io.BytesIO()
+        fig.savefig(buf, format='png', dpi=200, bbox_inches='tight', pad_inches=0.05, transparent=True)
+        plt.close(fig)
+        buf.seek(0)
+        png_bytes = buf.read()
+
+        # PNGs from matplotlib don't reliably carry DPI metadata, and
+        # PDF renderers disagree on how to interpret pixels without it —
+        # that's what caused wildly inconsistent formula sizes (some huge,
+        # some tiny) in testing. Sidestep the ambiguity entirely: read the
+        # image's actual pixel aspect ratio and size it in `em` units
+        # (relative to the surrounding paragraph's font size) instead of
+        # relying on any physical/DPI-based sizing.
+        width_px, height_px = _png_dimensions(png_bytes)
+        aspect = (width_px / height_px) if height_px else 1
+        height_em = 1.5 if display else 1.1
+        width_em = round(height_em * aspect, 3)
+
+        encoded = _b64.b64encode(png_bytes).decode('ascii')
+        if display:
+            style = f'display:block;margin:8pt auto;height:{height_em}em;width:{width_em}em;'
+        else:
+            style = f'vertical-align:middle;height:{height_em}em;width:{width_em}em;'
+        return f'<img src="data:image/png;base64,{encoded}" style="{style}" alt="formula">'
+    except Exception as e:
+        print(f"[WARN] formula render failed for {latex!r}: {e}")
+        return None
+
+
+def _png_dimensions(png_bytes):
+    """Read width/height (pixels) straight from the PNG header — avoids
+    pulling in PIL just for this."""
+    if png_bytes[:8] != b'\x89PNG\r\n\x1a\n':
+        return (1, 1)
+    width = int.from_bytes(png_bytes[16:20], 'big')
+    height = int.from_bytes(png_bytes[20:24], 'big')
+    return (width, height or 1)
+
+
+def render_formulas_in_content(content):
+    """Replace $$...$$ (block) and $...$ (inline) LaTeX-ish math with
+    rendered images, skipping fenced code blocks so literal $ in code
+    isn't touched."""
+    if not MATPLOTLIB_AVAILABLE or not content:
+        return content
+
+    parts = re.split(r'(```.*?```)', content, flags=re.DOTALL)
+    for i, part in enumerate(parts):
+        if part.startswith('```'):
+            continue  # leave code blocks untouched
+
+        def _block_sub(m):
+            img = render_latex_to_img(m.group(1).strip(), display=True)
+            return img if img else m.group(0)
+        part = re.sub(r'\$\$(.+?)\$\$', _block_sub, part, flags=re.DOTALL)
+
+        def _inline_sub(m):
+            img = render_latex_to_img(m.group(1).strip(), display=False)
+            return img if img else m.group(0)
+        part = re.sub(r'(?<!\$)\$(?!\$)([^\$\n]+?)(?<!\$)\$(?!\$)', _inline_sub, part)
+
+        parts[i] = part
+    return ''.join(parts)
+
+
 def content_to_html(content):
     """Same markdown-ish content format used for the .docx/.md exports —
     render it through the `markdown` library rather than reimplementing
-    a parser here."""
-    return md_lib.markdown(content or '', extensions=MD_EXTENSIONS)
+    a parser here. LaTeX-ish $$...$$ / $...$ formulas are rendered to
+    images first, since the `markdown` library has no concept of math."""
+    content = render_formulas_in_content(content or '')
+    return md_lib.markdown(content, extensions=MD_EXTENSIONS)
 
 
 @app.route('/api/export-chat-pdf', methods=['POST'])
@@ -965,31 +1115,47 @@ def export_chat_pdf():
         if not messages:
             return jsonify({'error': 'No messages'}), 400
 
-        body_parts = []
-        for i, msg in enumerate(messages):
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-            role_label = 'You' if role == 'user' else 'Gemini'
-            role_class = 'user' if role == 'user' else 'model'
+        def _build_pdf():
+            # Everything here is blocking CPU work (matplotlib formula
+            # rendering + WeasyPrint's native Pango/Cairo calls) — none of
+            # it is gevent-aware, so it all needs to run inside the
+            # threadpool together, not just the final write_pdf() call,
+            # or earlier steps would still freeze the worker.
+            body_parts = []
+            for i, msg in enumerate(messages):
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+                role_label = 'You' if role == 'user' else 'Gemini'
+                role_class = 'user' if role == 'user' else 'model'
 
-            body_parts.append(f'<div class="msg-role {role_class}">{role_label}</div>')
-            body_parts.append(content_to_html(content))
+                body_parts.append(f'<div class="msg-role {role_class}">{role_label}</div>')
+                body_parts.append(content_to_html(content))
 
-            if i < len(messages) - 1:
-                body_parts.append('<hr class="msg-divider">')
+                if i < len(messages) - 1:
+                    body_parts.append('<hr class="msg-divider">')
 
-        html_doc = f"""
-        <html>
-          <head><meta charset="utf-8"><style>{PDF_PAGE_CSS}</style></head>
-          <body>
-            <h1>{title}</h1>
-            <div class="pdf-date">{datetime.now().strftime('%d.%m.%Y %H:%M')}</div>
-            {''.join(body_parts)}
-          </body>
-        </html>
-        """
+            html_doc = f"""
+            <html>
+              <head><meta charset="utf-8"><style>{PDF_PAGE_CSS}</style></head>
+              <body>
+                <h1>{title}</h1>
+                <div class="pdf-date">{datetime.now().strftime('%d.%m.%Y %H:%M')}</div>
+                {''.join(body_parts)}
+              </body>
+            </html>
+            """
 
-        pdf_bytes = WeasyHTML(string=html_doc).write_pdf()
+            return WeasyHTML(string=html_doc).write_pdf()
+
+        # WeasyPrint's rendering (Pango/Cairo) and matplotlib's formula
+        # rendering are both blocking native/CPU calls — gevent's
+        # cooperative scheduler can't preempt them, so running them
+        # directly on the greenlet would freeze the ENTIRE worker
+        # (including unrelated requests, like docx exports, routed to
+        # the same worker) for the duration. Offload to gevent's
+        # real-OS-thread pool so the worker's event loop stays free to
+        # serve other requests concurrently.
+        pdf_bytes = gevent.get_hub().threadpool.spawn(_build_pdf).get()
         buf = io.BytesIO(pdf_bytes)
         buf.seek(0)
 
