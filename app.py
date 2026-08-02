@@ -692,6 +692,32 @@ def parse_matrix_env(latex):
 
 def build_omath(latex):
     omath = make_el(MATH_NS, 'oMath')
+    s = latex.strip()
+
+    # Full expression is a matrix (\begin{matrix}/pmatrix/bmatrix/etc)
+    mat = parse_matrix_env(s)
+    if mat is not None:
+        omath.append(mat)
+        return omath
+
+    # Expression contains \begin{ somewhere (prefix text + a matrix), e.g.
+    # "A = \begin{pmatrix}...\end{pmatrix}" — this was previously dropped
+    # entirely since build_omath only ever called parse_latex directly.
+    begin_idx = s.find(chr(92) + 'begin{')
+    if begin_idx >= 0:
+        prefix = s[:begin_idx].strip()
+        rest = s[begin_idx:]
+        if prefix:
+            for el in (parse_latex(prefix) or []):
+                omath.append(el)
+        mat2 = parse_matrix_env(rest)
+        if mat2 is not None:
+            omath.append(mat2)
+        else:
+            for el in (parse_latex(rest) or []):
+                omath.append(el)
+        return omath
+
     elements = parse_latex(latex)
     for el in elements:
         omath.append(el)
@@ -724,6 +750,15 @@ def embed_image_from_markdown(doc, alt_text, src):
             raise ValueError(f'unsupported image src: {src[:50]}')
 
         img_stream = io.BytesIO(img_bytes)
+
+        # Validate this is actually decodable image data before going any
+        # further — a hotlink-protected or dead image URL often returns an
+        # HTML error page (403, etc) with a 200 status, which would
+        # otherwise get embedded as a "picture" and render as corrupted
+        # garbage in the document instead of failing cleanly.
+        with PILImage.open(img_stream) as pil_img:
+            pil_img.verify()
+        img_stream.seek(0)
 
         # Cap display width at 5.5in (fits standard page margins) without
         # upscaling naturally-smaller images like small screenshots.
